@@ -1,0 +1,219 @@
+---
+title: "Titanic"
+author: "Matthew Houser"
+date: "7/26/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+Setup: Convert character features to factors, add column that says "Survived" or "Died" rather than 1 and 0 for graphical reasons. Rename columns for simplicity.
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(discrim)
+library(readr)
+library(tidymodels)
+titanic <- read.csv("https://web.stanford.edu/class/archive/cs/cs109/cs109.1166/stuff/titanic.csv") %>% 
+  mutate_if(is.character, factor) %>% 
+  mutate(Survived_text = case_when(Survived == 1 ~ "Survived", Survived == 0 ~ "Died")) 
+
+names(titanic) <- c("Survived", "Pclass", "Name", "Sex", "Age", "SibSp", "ParCh", "Fare", "Survived_text")
+```
+
+Inspect the dataset. We have 8 unique features: Survived, and integer indicating whether they survived or died, what passenger class their ticket was, their name, sex, and age, how many siblings or spouses were on board with them, how many parents or children were on board with them, and their ticket fare. 
+```{r}
+str(titanic)
+```
+Let's find how many people in the dataset Survived
+```{r}
+titanic %>% 
+  count(Survived_text)
+```
+Let's facet survival by sex
+```{r}
+titanic %>% 
+  group_by(Sex) %>% 
+  count(Survived_text)
+```
+
+
+Exploratory Data Analysis: 
+```{r}
+titanic %>% 
+  group_by(Sex, Pclass, Survived_text) %>% 
+  tally() %>% 
+  ggplot(aes(Survived_text, n, fill = Survived_text)) +
+  geom_col() +
+  facet_grid(Sex ~ Pclass) +
+  geom_text(aes(label = n, vjust = -0.5, hjust = .5), size = 3) +
+  scale_y_continuous(limits = c(0, 310)) +
+  xlab("Survival Status") +
+  ylab("Sum") +
+  ggtitle("Number of Titanic Survivors/Casualties by Passenger Class and Sex")
+
+```
+
+
+```{r}
+titanic %>% 
+  group_by(Pclass, Sex, Survived_text) %>% 
+  tally() %>% 
+  mutate(percent = n/sum(n)) %>% 
+  ggplot(aes(Survived_text, percent, fill = Survived_text)) +
+  geom_col() +
+  facet_grid(Sex ~ Pclass) + 
+  geom_text(aes(label = round(percent, 2), vjust = -0.5, hjust = .5), size = 3) +
+  scale_y_continuous(limits = c(0, 1.05)) +
+  xlab("Survival Status") +
+  ylab("Percent")+
+  ggtitle("Percentage of Titanic Survivors/Casualties by Passenger Class and Sex")
+
+```
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived_text, Age)) +
+  geom_jitter(aes(color = factor(ParCh)), width = .2) +
+  facet_wrap(Sex ~ Pclass) +
+  ggtitle("Survival by Sex, Passenger Class and Parents/Children On Board")
+  
+```
+
+```{r}
+titanic %>% 
+  ggplot(aes(Survived_text, Age)) +
+  geom_jitter(aes(color = factor(SibSp)), width = .25) +
+  facet_wrap(Sex ~ Pclass) +
+  ggtitle("Survival by Sex, Passenger Class and Siblings/Spouses On Board")
+
+```
+```{r}
+#Convert Survived column to a factor in order for classification to work
+titanic$Survived <- as.factor(titanic$Survived)
+
+#Set seed for reproducibility, split data into training and testing sets
+set.seed(1)
+titanic_split <- titanic %>% 
+  initial_split(prop = .8, strata = Survived)
+
+train <- training(titanic_split)
+test <- testing(titanic_split)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+#Create recipe, model specifications and workflow:
+titanic_recipe <- recipe(Survived ~ Sex + Age + SibSp + Pclass + ParCh + Fare, data = train) %>% 
+  step_downsample(Survived)
+
+glm_spec <- logistic_reg() %>% 
+  set_engine("glm")
+
+rf_spec <- rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+lda_spec <- discrim_linear() %>% 
+  set_engine("MASS") %>% 
+  translate()
+
+qda_spec <- discrim_regularized(frac_common_cov = 0, frac_identity = 0) %>% 
+  set_engine("klaR") %>% 
+  translate()
+  
+titanic_wf <- workflow() %>% 
+  add_recipe(titanic_recipe)
+```
+
+```{r}
+#Fit the logistic model
+titanic_glm <- titanic_wf %>% 
+  add_model(glm_spec) %>% 
+  fit(data = train)
+
+titanic_glm
+```
+
+```{r}
+#Fit the LDA model
+titanic_lda <- titanic_wf %>% 
+  add_model(lda_spec) %>% 
+  fit(data= train)
+
+titanic_lda
+```
+
+```{r}
+#Fit the QDA
+titanic_qda <- titanic_wf %>% 
+  add_model(qda_spec) %>% 
+  fit(data = train)
+
+titanic_qda
+```
+
+```{r}
+#Fit the random forest
+titanic_rf <- titanic_wf %>% 
+  add_model(rf_spec) %>% 
+  fit(data = train)
+
+titanic_rf
+```
+
+```{r}
+#Use the training model on the test set and then show confusion matrix
+results <- test %>% 
+  bind_cols(predict(titanic_glm, test) %>% 
+              rename(.pred_glm = .pred_class)) %>% 
+  bind_cols(predict(titanic_lda, test) %>% 
+              rename(.pred_lda = .pred_class)) %>% 
+  bind_cols(predict(titanic_qda, test) %>% 
+              rename(.pred_qda = .pred_class)) %>% 
+  bind_cols(predict(titanic_rf, test) %>% 
+              rename(.pred_rf = .pred_class))
+ 
+#Confusion matrix for logistic regression
+results %>% 
+  conf_mat(truth = Survived, estimate = .pred_glm)
+#Confusion matrix for LDA
+results %>% 
+  conf_mat(truth = Survived, estimate = .pred_lda)
+#Confusion matrix for QDA
+results %>% 
+  conf_mat(truth = Survived, estimate = .pred_qda)
+#Confusion matrix for Random Forest
+results %>% 
+  conf_mat(truth = Survived, estimate = .pred_rf)
+```
+
+```{r}
+#Find sensitivity for each model 
+sens_glm <- sensitivity(results, truth = Survived, estimate = .pred_glm)
+sens_lda <- sensitivity(results, truth = Survived, estimate = .pred_lda)
+sens_qda <- sensitivity(results, truth = Survived, estimate = .pred_qda)
+sens_rf <- sensitivity(results, truth = Survived, estimate = .pred_rf)
+
+c(sens_glm$.estimate, sens_lda$.estimate, sens_qda$.estimate, sens_rf$.estimate)
+```
+
+```{r}
+#Find specificity for each model 
+spec_glm <- specificity(results, truth = Survived, estimate = .pred_glm)
+spec_lda <- specificity(results, truth = Survived, estimate = .pred_lda)
+spec_qda <- specificity(results, truth = Survived, estimate = .pred_qda)
+spec_rf <- specificity(results, truth = Survived, estimate = .pred_rf)
+
+c(spec_glm$.estimate, spec_lda$.estimate, spec_qda$.estimate, spec_rf$.estimate)
+```
+
+```{r}
+#Find accuracy for each model
+acc_glm <- accuracy(results, truth = Survived, estimate = .pred_glm)
+acc_lda <- accuracy(results, truth = Survived, estimate = .pred_lda)
+acc_qda <- accuracy(results, truth = Survived, estimate = .pred_qda)
+acc_rf <- accuracy(results, truth = Survived, estimate = .pred_rf)
+
+c(acc_glm$.estimate, acc_lda$.estimate, acc_qda$.estimate, acc_rf$.estimate)
+```
